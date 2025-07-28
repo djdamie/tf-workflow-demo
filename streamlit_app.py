@@ -3,6 +3,7 @@ import requests
 import json
 from datetime import datetime
 import pandas as pd
+import time
 
 # Page config
 st.set_page_config(
@@ -18,17 +19,44 @@ if 'thread_id' not in st.session_state:
     st.session_state.thread_id = f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 if 'project_info' not in st.session_state:
     st.session_state.project_info = {}
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = ""
 
 # Your LangGraph endpoint
 LANGGRAPH_URL = "https://tf-supervisor-workflow-v2-855da41ec83656b3b397ebe6ba569c43.us.langgraph.app"
+
+# API Key Input (at the top)
+if not st.session_state.api_key:
+    st.warning("🔐 API Key Required")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        api_key_input = st.text_input(
+            "Enter your LangGraph API Key:",
+            type="password",
+            help="Contact your TF administrator for an API key"
+        )
+    with col2:
+        if st.button("Connect", type="primary"):
+            if api_key_input:
+                st.session_state.api_key = api_key_input
+                st.success("✅ Connected!")
+                st.rerun()
+            else:
+                st.error("Please enter an API key")
+    
+    st.info("💡 Demo credentials can be provided by your TF contact")
+    st.stop()  # Stop here until API key is provided
+
+# Show connected status
+st.sidebar.success(f"✅ Connected to TF Workflow")
+if st.sidebar.button("🔓 Disconnect"):
+    st.session_state.api_key = ""
+    st.rerun()
 
 # Sidebar
 with st.sidebar:
     st.header("🎵 TF Music Workflow")
     st.caption("Find, clear, and deliver the perfect music")
-    
-    # Show API docs link
-    st.markdown(f"[📚 API Documentation]({LANGGRAPH_URL}/docs)")
     
     st.divider()
     
@@ -158,20 +186,18 @@ if hasattr(st.session_state, 'pending_message'):
     
     # Process through API
     with st.chat_message("assistant"):
-        response_placeholder = st.empty()
         with st.spinner("🎵 TF Agents analyzing your brief..."):
             try:
-                # Use the working stream endpoint
+                # API call with authentication
                 headers = {
                     "Content-Type": "application/json",
-                    "X-Api-Key": st.secrets.get("LANGGRAPH_API_KEY", "")
+                    "x-api-key": st.session_state.api_key  # Use the provided API key
                 }
                 
                 response = requests.post(
-                    f"{LANGGRAPH_URL}/runs/stream",
+                    f"{LANGGRAPH_URL}/runs/invoke",
                     headers=headers,
                     json={
-                        "assistant_id": "agent",
                         "input": {
                             "messages": [],
                             "raw_brief": prompt,
@@ -186,58 +212,13 @@ if hasattr(st.session_state, 'pending_message'):
                             }
                         }
                     },
-                    stream=True,
                     timeout=30
                 )
                 
                 if response.status_code == 200:
-                    # Process streaming response
-                    result = {}
-                    run_id = None
+                    result = response.json()
                     
-                    for line in response.iter_lines():
-                        if line:
-                            line_str = line.decode('utf-8')
-                            
-                            # Parse SSE format
-                            if line_str.startswith('event: '):
-                                event_type = line_str[7:]
-                            elif line_str.startswith('data: '):
-                                try:
-                                    data = json.loads(line_str[6:])
-                                    
-                                    # Handle different event types
-                                    if event_type == 'metadata':
-                                        run_id = data.get('run_id')
-                                        response_placeholder.info(f"🔄 Processing... (Run ID: {run_id[:8]}...)")
-                                    
-                                    elif event_type == 'values':
-                                        # This contains the state
-                                        if 'brief_analysis' in data:
-                                            result['brief_analysis'] = data['brief_analysis']
-                                        if 'project_strategy' in data:
-                                            result['project_strategy'] = data['project_strategy']
-                                    
-                                    elif event_type == 'updates':
-                                        # Updates to the state
-                                        if isinstance(data, list):
-                                            for update in data:
-                                                if isinstance(update, dict):
-                                                    result.update(update)
-                                        elif isinstance(data, dict):
-                                            result.update(data)
-                                    
-                                    elif event_type == 'end':
-                                        # Stream ended
-                                        break
-                                        
-                                except json.JSONDecodeError:
-                                    continue
-                    
-                    # Clear the placeholder
-                    response_placeholder.empty()
-                    
-                    # Create formatted response
+                    # Create a formatted response
                     response_parts = []
                     
                     # Show brief analysis
@@ -246,6 +227,7 @@ if hasattr(st.session_state, 'pending_message'):
                         analysis = result['brief_analysis']
                         
                         if isinstance(analysis, dict):
+                            # Format each section nicely
                             sections = {
                                 'client_info': '**Client Information**',
                                 'business_brief': '**Business Requirements**',
@@ -288,24 +270,37 @@ if hasattr(st.session_state, 'pending_message'):
                                 for consideration in strategy['key_considerations']:
                                     response_parts.append(f"- {consideration}")
                     
-                    # Display results
+                    # Join all parts
                     if response_parts:
                         full_response = "\n".join(response_parts)
                         st.markdown(full_response)
                         st.session_state.messages.append({"role": "assistant", "content": full_response})
+                        
+                        # Show success message
                         st.success("✅ Brief analyzed successfully!")
                     else:
-                        # Simpler response if no structured data
-                        st.info("Brief processed. The analysis has been completed.")
+                        # Fallback if no structured data
+                        st.info("Brief received and processed. The analysis has been completed.")
                         st.session_state.messages.append({"role": "assistant", "content": "Brief processed successfully."})
                     
                     # Force update of metrics
                     st.rerun()
                     
+                elif response.status_code == 403:
+                    st.error("❌ Authentication failed. Please check your API key.")
+                    st.session_state.api_key = ""  # Clear the invalid key
+                    st.session_state.messages.append({"role": "assistant", "content": "Authentication failed. Please reconnect with a valid API key."})
+                    time.sleep(2)
+                    st.rerun()
+                    
                 else:
                     error_msg = f"API Error: {response.status_code}"
                     if response.text:
-                        error_msg += f"\n{response.text[:500]}"
+                        try:
+                            error_detail = json.loads(response.text)
+                            error_msg += f"\n{error_detail.get('detail', response.text)}"
+                        except:
+                            error_msg += f"\n{response.text}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
                     
@@ -313,7 +308,7 @@ if hasattr(st.session_state, 'pending_message'):
                 st.error("Request timed out. The brief might be too complex. Try a shorter version.")
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Note: Make sure the API key is configured in Streamlit secrets.")
+                st.info("Please check your connection and try again.")
 
 # Chat input
 if prompt := st.chat_input("Paste your brief or describe your music needs..."):
@@ -323,10 +318,11 @@ if prompt := st.chat_input("Paste your brief or describe your music needs..."):
 # Instructions at bottom
 with st.expander("ℹ️ How to use"):
     st.markdown("""
-    1. **Paste a brief**: Copy and paste your project brief into the chat
-    2. **Upload files**: Use the sidebar to upload CSV budget files or brief documents  
-    3. **Try examples**: Click the quick example buttons in the sidebar
-    4. **View analysis**: The system will analyze your brief and show:
+    1. **Enter API Key**: You'll need a LangGraph API key to connect (provided by your TF contact)
+    2. **Paste a brief**: Copy and paste your project brief into the chat
+    3. **Upload files**: Use the sidebar to upload CSV budget files or brief documents  
+    4. **Try examples**: Click the quick example buttons in the sidebar
+    5. **View analysis**: The system will analyze your brief and show:
        - Project type (A/B/C based on budget)
        - Budget and calculated payout
        - Recommended approach
@@ -338,8 +334,4 @@ with st.expander("ℹ️ How to use"):
     - $30,000-100,000: 25% margin
     - $100,000-250,000: 20% margin
     - Above $500,000: 10% margin
-    
-    **Need Help?**
-    - Check the [API Documentation]({LANGGRAPH_URL}/docs) for technical details
-    - Contact your TF administrator for support
     """)
