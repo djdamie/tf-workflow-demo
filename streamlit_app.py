@@ -3,7 +3,6 @@ import requests
 import json
 from datetime import datetime
 import pandas as pd
-import time
 
 # Page config
 st.set_page_config(
@@ -28,6 +27,9 @@ with st.sidebar:
     st.header("🎵 TF Music Workflow")
     st.caption("Find, clear, and deliver the perfect music")
     
+    # Show API docs link
+    st.markdown(f"[📚 API Documentation]({LANGGRAPH_URL}/docs)")
+    
     st.divider()
     
     # File upload
@@ -48,7 +50,6 @@ with st.sidebar:
                 csv_content = df.to_string()
                 brief_text = f"Please analyze this budget table:\n\n{csv_content}"
                 st.session_state.messages.append({"role": "user", "content": f"📊 Processing budget file: {uploaded_file.name}"})
-                # Trigger rerun to process
                 st.session_state.pending_message = brief_text
                 st.rerun()
         else:
@@ -157,22 +158,20 @@ if hasattr(st.session_state, 'pending_message'):
     
     # Process through API
     with st.chat_message("assistant"):
+        response_placeholder = st.empty()
         with st.spinner("🎵 TF Agents analyzing your brief..."):
             try:
-                # API call
+                # Use the working stream endpoint
                 headers = {
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "X-Api-Key": st.secrets.get("LANGGRAPH_API_KEY", "")
                 }
                 
-                # Add API key if available
-                api_key = st.secrets.get("LANGGRAPH_API_KEY", "")
-                if api_key:
-                    headers["x-api-key"] = api_key
-                
                 response = requests.post(
-                    f"{LANGGRAPH_URL}/runs/invoke",
+                    f"{LANGGRAPH_URL}/runs/stream",
                     headers=headers,
                     json={
+                        "assistant_id": "agent",
                         "input": {
                             "messages": [],
                             "raw_brief": prompt,
@@ -187,13 +186,58 @@ if hasattr(st.session_state, 'pending_message'):
                             }
                         }
                     },
+                    stream=True,
                     timeout=30
                 )
                 
                 if response.status_code == 200:
-                    result = response.json()
+                    # Process streaming response
+                    result = {}
+                    run_id = None
                     
-                    # Create a formatted response
+                    for line in response.iter_lines():
+                        if line:
+                            line_str = line.decode('utf-8')
+                            
+                            # Parse SSE format
+                            if line_str.startswith('event: '):
+                                event_type = line_str[7:]
+                            elif line_str.startswith('data: '):
+                                try:
+                                    data = json.loads(line_str[6:])
+                                    
+                                    # Handle different event types
+                                    if event_type == 'metadata':
+                                        run_id = data.get('run_id')
+                                        response_placeholder.info(f"🔄 Processing... (Run ID: {run_id[:8]}...)")
+                                    
+                                    elif event_type == 'values':
+                                        # This contains the state
+                                        if 'brief_analysis' in data:
+                                            result['brief_analysis'] = data['brief_analysis']
+                                        if 'project_strategy' in data:
+                                            result['project_strategy'] = data['project_strategy']
+                                    
+                                    elif event_type == 'updates':
+                                        # Updates to the state
+                                        if isinstance(data, list):
+                                            for update in data:
+                                                if isinstance(update, dict):
+                                                    result.update(update)
+                                        elif isinstance(data, dict):
+                                            result.update(data)
+                                    
+                                    elif event_type == 'end':
+                                        # Stream ended
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    continue
+                    
+                    # Clear the placeholder
+                    response_placeholder.empty()
+                    
+                    # Create formatted response
                     response_parts = []
                     
                     # Show brief analysis
@@ -202,7 +246,6 @@ if hasattr(st.session_state, 'pending_message'):
                         analysis = result['brief_analysis']
                         
                         if isinstance(analysis, dict):
-                            # Format each section nicely
                             sections = {
                                 'client_info': '**Client Information**',
                                 'business_brief': '**Business Requirements**',
@@ -245,17 +288,15 @@ if hasattr(st.session_state, 'pending_message'):
                                 for consideration in strategy['key_considerations']:
                                     response_parts.append(f"- {consideration}")
                     
-                    # Join all parts
+                    # Display results
                     if response_parts:
                         full_response = "\n".join(response_parts)
                         st.markdown(full_response)
                         st.session_state.messages.append({"role": "assistant", "content": full_response})
-                        
-                        # Show success message
                         st.success("✅ Brief analyzed successfully!")
                     else:
-                        # Fallback if no structured data
-                        st.info("Brief received and processed. The analysis has been completed.")
+                        # Simpler response if no structured data
+                        st.info("Brief processed. The analysis has been completed.")
                         st.session_state.messages.append({"role": "assistant", "content": "Brief processed successfully."})
                     
                     # Force update of metrics
@@ -264,7 +305,7 @@ if hasattr(st.session_state, 'pending_message'):
                 else:
                     error_msg = f"API Error: {response.status_code}"
                     if response.text:
-                        error_msg += f"\n{response.text}"
+                        error_msg += f"\n{response.text[:500]}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
                     
@@ -272,7 +313,7 @@ if hasattr(st.session_state, 'pending_message'):
                 st.error("Request timed out. The brief might be too complex. Try a shorter version.")
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Note: Make sure the API key is configured in Streamlit secrets if required.")
+                st.info("Note: Make sure the API key is configured in Streamlit secrets.")
 
 # Chat input
 if prompt := st.chat_input("Paste your brief or describe your music needs..."):
@@ -297,4 +338,8 @@ with st.expander("ℹ️ How to use"):
     - $30,000-100,000: 25% margin
     - $100,000-250,000: 20% margin
     - Above $500,000: 10% margin
+    
+    **Need Help?**
+    - Check the [API Documentation]({LANGGRAPH_URL}/docs) for technical details
+    - Contact your TF administrator for support
     """)
